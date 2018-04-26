@@ -1,0 +1,103 @@
+###Initial script for functions for calculating N dep
+rm(list=ls(all=T))
+#Packages
+library(rnrfa)
+library(data.table)
+library(ncar)
+library(nnet)
+
+#Direct calculation of trapezoidal area 
+trapezoid.area<-function(data,years){
+  output<-rep(0,(length(years)-1))
+  for (i in 1:(length(years)-1)){
+    output[i]<-((data[i]+data[i+1])/2)*(years[i+1]-years[i])
+    total<-sum(unlist(output))}
+  return(total)
+  }
+
+#Extract value function
+extract.value<-function(target.year,data,years){
+  selected.data<-data.frame(years=c(years[[max(which(years<=target.year))]],years[[which.max(years>=target.year)]]),data=c(data[[max(which(years<=target.year))]],data[[which.max(years>=target.year)]]))
+  regress<-lm(data~years,selected.data)
+    value<-((target.year*(ifelse(is.na(regress$coefficients[2]),0,regress$coefficients[2])))+regress$coefficients[1])
+  return(value)
+} 
+
+#Extract series function
+extract.series<-function(target.min,target.max=2010,data,years){
+  data.df<-data.frame(years=years,data=unlist(data))
+  data.subset<-subset(data.df, years>target.min & years<target.max)
+  min<-extract.value(target.min,data,years)
+  max<-extract.value(target.max,data,years)
+  min.data<-data.frame(years=target.min,data=min)
+  max.data<-data.frame(years=target.max,data=max)
+  output<-rbind(min.data,data.subset,max.data)
+  return(output)
+}
+
+##cumulative function (single location)
+cumulativeN<-function(min,max=2010,data,years){
+  series<-extract.series(min,max,data,years)
+  area<-trapezoid.area(series$data,series$years)
+  return(area)
+}
+
+##function to loop over cumulative N calcs (lots of locations)
+cumulativeNlist<-function(min,max=2010,data,years){
+    output<-rep("NA",(length(data[,1])))
+      for (i in 1:(length(data[,1]))){
+    output[i]<-cumulativeN(min,max,data[i,],years)
+    }
+    return(as.numeric(output))}
+
+###Years above CL
+first.exceeds.cl<-function(data,years,cl){
+    high<-suppressWarnings(ifelse(is.finite(min(which(data>cl))),min(which(data>cl)),NA))#finds position in series first above CL, returns NA if not found
+    if(is.na(high)) return(NA) #ends if NA
+    low<-high-1 #value immediately preceding first above CL
+    selected.data<-data.frame(years=c(years[low],years[high]),data=c(data[low],data[high])) #compiling this
+    regress<-lm(data~years,selected.data) #doing regression
+    value<-(cl-regress$coefficients[1])/regress$coefficients[2]  #calculating based on cl value
+    value<-ifelse(is.na(high),NA,ifelse(is.na(value),min(years),value)) #checking if NA, returning appropriate alternatives
+  return(value)}
+
+last.exceeds.cl<-function(data,years,cl){
+  low<-suppressWarnings(ifelse(is.finite(max(which(data>cl))),max(which(data>cl)),NA))
+  if(is.na(low)) return(NA)
+  high<-low+1 #value immediately preceding
+  selected.data<-data.frame(years=c(years[low],years[high]),data=c(data[low],data[high]))
+  regress<-lm(data~years,selected.data)
+  value<-(cl-regress$coefficients[1])/regress$coefficients[2]
+  value<-ifelse(is.na(low),NA,ifelse(is.na(value),max(years),value))
+  return(value)}
+
+years.above.cl<-function(data,years,cl){
+  value<-last.exceeds.cl(data,years,cl)-first.exceeds.cl(data,years,cl)
+  value<-ifelse(is.na(value),0,value)
+  }
+
+###looped function
+year.above.cl.list<-function(min,max=2010,data,years,cl){
+    output<-rep("NA",(length(data[,1])))
+    for (i in 1:(length(data[,1]))){
+      series<-extract.series(min,max,data[i,],years)
+      output[i]<-years.above.cl(series$data,series$years,cl)
+    }
+    return(as.numeric(output))}
+
+##Next, cumulative above a threshold/cl
+
+cumulative.above.threshold<-function(target.min,target.max=2010,data,years,cl){
+    series<-extract.series(target.min,target.max,data,years)
+    first<-first.exceeds.cl(series$data,series$years,cl)
+    first<-ifelse(first>min(series$years),first,NA)
+    last<-last.exceeds.cl(series$data,series$years,cl)
+    last<-ifelse(last<max(years),last,NA)
+    series<-series[series$data>cl,]#removing data points below CL
+    first.exceeds<-data.frame(years=first,data=cl)
+    last.exceeds<-data.frame(years=last,data=cl)
+    series<-rbind(first.exceeds,series,last.exceeds)
+    series<-series[complete.cases(series),] 
+    area.above.threshold<-ifelse(nrow(series)>0,(trapezoid.area(series$data,series$years)),NA)
+    return(area.above.threshold)
+}
