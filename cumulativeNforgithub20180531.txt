@@ -1,0 +1,221 @@
+###############################################################################################################
+
+###Underlying functions to format data for calculations
+#Direct calculation of trapezoidal area 
+trapezoid.area<-function(data,years){
+  output<-rep(0,(length(years)-1))
+  for (i in 1:(length(years)-1)){
+    output[i]<-((data[i]+data[i+1])/2)*(years[i+1]-years[i])
+    total<-sum(unlist(output))}
+  return(total)
+  }
+
+#Extract value function
+extract.value<-function(target.year,data,years){
+  selected.data<-data.frame(years=c(years[[max(which(years<=target.year))]],years[[which.max(years>=target.year)]]),data=c(data[[max(which(years<=target.year))]],data[[which.max(years>=target.year)]]))
+  regress<-lm(data~years,selected.data)
+    value<-((target.year*(ifelse(is.na(regress$coefficients[2]),0,regress$coefficients[2])))+regress$coefficients[1])
+  return(value)
+} 
+
+#Extract series function
+extract.series<-function(target.min,target.max=2010,data,years){
+  data.df<-data.frame(years=years,data=unlist(data))
+  data.subset<-subset(data.df, years>target.min & years<target.max)
+  min<-extract.value(target.min,data,years)
+  max<-extract.value(target.max,data,years)
+  min.data<-data.frame(years=target.min,data=min)
+  max.data<-data.frame(years=target.max,data=max)
+  output<-rbind(min.data,data.subset,max.data)
+  return(output)
+}
+
+#Functions for fully cumulative deposition over a defined period
+#cumulative function (single location)
+cumulativeN<-function(min,max=2010,data,years){
+  series<-extract.series(min,max,data,years)
+  area<-trapezoid.area(series$data,series$years)
+  return(area)
+}
+
+#function to loop over cumulative N calcs (lots of locations)
+cumulativeNlist<-function(min,max=2010,data,years){
+    output<-rep("NA",(length(data[,1])))
+      for (i in 1:(length(data[,1]))){
+    output[i]<-cumulativeN(min,max,data[i,],years)
+    }
+    return(as.numeric(output))}
+
+###Functions to calculate years above CL. As presently written, code assumes a single exceedance and then single decline. 
+#first year exceeding CL
+first.exceeds.cl<-function(data,years,cl){
+    high<-suppressWarnings(ifelse(is.finite(min(which(data>cl))),min(which(data>cl)),NA))#finds position in series first above CL, returns NA if not found
+    if(is.na(high)) return(NA) #ends if NA
+    low<-high-1 #value immediately preceding first above CL
+    selected.data<-data.frame(years=c(years[low],years[high]),data=c(data[low],data[high])) #compiling this
+    regress<-lm(data~years,selected.data) #doing regression
+    value<-(cl-regress$coefficients[1])/regress$coefficients[2]  #calculating based on cl value
+    value<-ifelse(is.na(high),NA,ifelse(is.na(value),min(years),value)) #checking if NA, returning appropriate alternatives
+  return(value)}
+
+#last year exceeding CL
+last.exceeds.cl<-function(data,years,cl){
+  low<-suppressWarnings(ifelse(is.finite(max(which(data>cl))),max(which(data>cl)),NA))
+  if(is.na(low)) return(NA)
+  high<-low+1 #value immediately preceding
+  selected.data<-data.frame(years=c(years[low],years[high]),data=c(data[low],data[high]))
+  regress<-lm(data~years,selected.data)
+  value<-(cl-regress$coefficients[1])/regress$coefficients[2]
+  value<-ifelse(is.na(low),NA,ifelse(is.na(value),max(years),value))
+  return(value)}
+
+#years above critical load (combining above two functions)
+years.above.cl<-function(data,years,cl){
+  value<-last.exceeds.cl(data,years,cl)-first.exceeds.cl(data,years,cl)
+  value<-ifelse(is.na(value),0,value)
+}
+
+#looped function to apply to list of sites
+year.above.cl.list<-function(min,max=2010,data,years,cl){
+    output<-rep("0",(length(data[,1])))
+    for (i in 1:(length(data[,1]))){
+      series<-extract.series(min,max,data[i,],years)
+      output[i]<-years.above.cl(series$data,series$years,cl)
+    }
+    return(as.numeric(output))}
+
+###Next, cumulative above a threshold/cl
+#single locations
+cumulative.above.threshold<-function(target.min,target.max=2010,data,years,cl=0){
+    series<-extract.series(target.min,target.max,data,years)
+    first<-first.exceeds.cl(series$data,series$years,cl)
+    first<-ifelse(first>min(series$years),first,NA)
+    last<-last.exceeds.cl(series$data,series$years,cl)
+    last<-ifelse(last<max(years),last,NA)
+    series<-series[series$data>cl,]#removing data points below CL
+    first.exceeds<-data.frame(years=first,data=cl)
+    last.exceeds<-data.frame(years=last,data=cl)
+    series<-rbind(first.exceeds,series,last.exceeds)
+    series<-series[complete.cases(series),] 
+    area.above.threshold<-ifelse(nrow(series)>0,(trapezoid.area(series$data,series$years)),NA)
+    return(area.above.threshold)
+}
+
+#looped function to apply to list of sites
+cumulative.above.threshold.list<-function(min,max=2010,data,years,cl){
+  output<-rep("0",(length(data[,1])))
+  for (i in 1:(length(data[,1]))){
+    series<-extract.series(min,max,data[i,],years)
+    output[i]<-cumulative.above.threshold(min,max,series$data,series$years,cl)
+    output[is.na(output)]<-0
+  }
+  return(as.numeric(output))}
+
+###Cumulative, giving disproportionate weight to recent data. Based on a logarithmic weighting of data from known years. Crude, simple approach. 
+#function for individual point
+cumulative.above.threshold.weighted<-function(target.min,target.max=2010,data,years,cl=0,weighting=NA){
+  series<-extract.series(target.min,target.max,data,years)
+  first<-first.exceeds.cl(series$data,series$years,cl)
+  first<-ifelse(first>min(series$years),first,NA)
+  last<-last.exceeds.cl(series$data,series$years,cl)
+  last<-ifelse(last<max(years),last,NA)
+  series<-series[series$data>cl,]#removing data points below CL
+  first.exceeds<-data.frame(years=first,data=cl)
+  last.exceeds<-data.frame(years=last,data=cl)
+  series<-rbind(first.exceeds,series,last.exceeds)
+  series<-series[complete.cases(series),] 
+  weighting<-exp(seq(log(1e-10),log(weighting),length.out=length(series$data)))
+  series$data<-series$data*weighting
+  area.above.threshold<-ifelse(nrow(series)>0,(trapezoid.area(series$data,series$years)),NA)
+  return(area.above.threshold)
+}
+
+#looped function to apply to list of sites
+cumulative.above.threshold.weighted.list<-function(min,max=2010,data,years,cl,weighting){
+  output<-rep("0",(length(data[,1])))
+  for (i in 1:(length(data[,1]))){
+    series<-extract.series(min,max,data[i,],years)
+    output[i]<-cumulative.above.threshold.weighted(min,max,series$data,series$years,cl,weighting)
+  }
+  return(as.numeric(output))}
+
+###Functions for minimum and maximum deposition
+#max
+max.dep.list<-function(min,max=2010,data,years){
+  output<-rep("0",(length(data[,1])))
+  for (i in 1:(length(data[,1]))){
+    series<-extract.series(min,max,data[i,],years)
+    output[i]<-max(series$data)
+  }
+  return(as.numeric(output))}
+
+#min
+min.dep.list<-function(min,max=2010,data,years){
+  output<-rep("0",(length(data[,1])))
+  for (i in 1:(length(data[,1]))){
+    series<-extract.series(min,max,data[i,],years)
+    output[i]<-min(series$data)
+  }
+  return(as.numeric(output))}
+
+##############################################################################################################
+#Setting up a vegan pipeline
+
+#function to do RDA and combine output. Inputs are text string referring to names of files. covar are variables specified as co-variates. env.pool are variables from which a pool of co-variates is automatically selected using ordistep. If both env.pool and covar supplied covar will be used.
+
+RDAwrapper<-function(veg, env, covar=NA, env.pool=NA){
+  veg.hel<-decostand(get(veg),method="hellinger")
+  if(!is.na(env.pool)){
+    minmodel<-(rda(veg.hel~1, na.action=na.omit))
+    selection<-ordistep(minmodel, scope = as.formula(paste(veg.hel,"~",env.pool)), trace=F)
+    covar<-paste((attr(selection$terms, which="term.labels")),collapse=",")
+    print(paste("covariates partialled out:", covar))}
+  rda.formula<-as.formula(if(is.na(covar)) {paste("veg.hel","~","env")} else {paste("veg.hel","~","env","+ Condition(",covar,")")})
+  veg.rda<-rda(rda.formula, na.action=na.omit)
+  veg.rda.anova<-anova(veg.rda, permutations=999)
+  results<-c(veg.rda.anova$Variance[1], veg.rda.anova$F[1], veg.rda.anova$Pr[1],veg.rda$CCA$eig/veg.rda$tot.chi)
+  return(results)
+}
+
+
+#function to loop through the whole thing
+
+files<-c("cs.current","cs.output1800","cs.output1900","cs.output1950","cs.output1970","cs.output1980","cs.output1990","cs.mindep","cs.maxdep","cs.abovecl","cs.cumabovecl","cs.cumaboveclweighed")
+
+#function
+multi.rda<-function(veg, env.files, covar=NA, env.pool=NA){
+  matrix<-matrix(nrow=length(env.files),ncol=4)
+  #envs<-lapply(env.files, FUN=get)
+  for(i in 1:length(env.files)){
+    matrix[i,1:4]<-RDAwrapper(veg=veg, env=get(env.files[i]), covar=covar, env.pool=env.pool)
+  }
+  df<-as.data.frame(matrix,row.names=files) 
+  colnames(df)<-c("constrained inertia","F","P.value","Proportion variance")
+  noquote(print(paste('Max variance:',rownames(df)[which.max(df[,4])])))
+  return(df)
+}
+
+#plotting
+rough.plot<-function(object){
+    col=rep(0,nrow(object))
+    col[match(max(object[,4]),object[,4])]=1
+    barplot(object$`Proportion variance`,ylim=c((min(object$`Proportion variance`)-0.01),(max(object$`Proportion variance`)+0.01)),xpd=F, ylab="proportion variance",axes=TRUE,legend.text=T,axisnames=T,names.arg=files,axis.lty="solid",cex.names=0.4,col=col)
+    abline(a=object[1,4],b=0)}
+
+#combining whole thing in one giant function!
+all.n.calcs<-function(ndep.past,years,samp.yr,ndep.current,cl,weighting=0){
+        output1800<-cumulativeNlist(1800,samp.yr,ndep.past,years)
+        output1900<-cumulativeNlist(1900,samp.yr,ndep.past,years)
+        output1950<-cumulativeNlist(1950,samp.yr,ndep.past,years)
+        output1970<-cumulativeNlist(1970,samp.yr,ndep.past,years)
+        output1980<-cumulativeNlist(1980,samp.yr,ndep.past,years)
+        output1990<-cumulativeNlist(1990,samp.yr,ndep.past,years)
+        output2010<-cumulativeNlist(2009,samp.yr,ndep.past,years)
+        maxdep<-max.dep.list(1800,samp.yr,ndep.past,years)
+        mindep<-min.dep.list(1800,samp.yr,ndep.past,years)
+        cumabovecl<-cumulative.above.threshold.list(1800,samp.yr,ndep.past,years,cl)
+        cumaboveclweighed<-cumulative.above.threshold.weighted.list(1800,samp.yr,ndep.past,years,weighting,cl)
+        abovecl<-year.above.cl.list(1800,samp.yr,ndep.past,years,cl)
+        alloutput<-data.frame(ndep.current,output1800,output1900,output1950,output1970,output1980,output1990,mindep,maxdep,abovecl,cumabovecl,cumaboveclweighed)
+        return(alloutput)}
+
